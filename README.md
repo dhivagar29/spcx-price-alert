@@ -5,8 +5,7 @@ A GitHub Actions job that watches the **SPCX** (SpaceX, NASDAQ) last price. When
 ## Schedule (UTC, weekdays only)
 
 ```
-30 13-20 * * 1-5   # hourly at :30, 13:30–20:30 UTC
-0 21 * * 1-5       # 21:00 UTC, just after the US cash close
+0 15,17,19,21 * * 1-5   # every 2 hours: 15:00, 17:00, 19:00, 21:00 UTC (8:30 PM, 10:30 PM, 12:30 AM, 2:30 AM IST)
 ```
 
 Also `workflow_dispatch` (manual run, see below).
