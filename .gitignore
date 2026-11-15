@@ -1,0 +1,12 @@
+# alert marker / actions cache
+.spcx-cache/
+# test temp files
+test/tmp/
+*.jsonl
+*.log
+__pycache__/
+# OS / editor junk
+.DS_Store
+Thumbs.db
+*.swp
+*~

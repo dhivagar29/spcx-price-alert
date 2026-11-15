@@ -1,0 +1,59 @@
+name: spcx-price-alert
+
+on:
+  schedule:
+    # UTC, weekdays only.
+    - cron: "30 13-20 * * 1-5" # hourly at :30, 13:30-20:30 UTC
+    - cron: "0 21 * * 1-5" # 21:00 UTC, just after the US cash close
+  workflow_dispatch:
+    inputs:
+      force_test:
+        description: "POST a test payload regardless of price (does not count as today's alert)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: spcx-price-alert
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      PRICE_THRESHOLD: ${{ vars.PRICE_THRESHOLD || '115.00' }}
+      MARKER_DIR: .spcx-cache
+    steps:
+      - name: Mask secrets
+        env:
+          SPCX_WEBHOOK_URL: ${{ secrets.SPCX_WEBHOOK_URL }}
+          SPCX_WEBHOOK_KEY: ${{ secrets.SPCX_WEBHOOK_KEY }}
+        run: |
+          for v in "$SPCX_WEBHOOK_URL" "$SPCX_WEBHOOK_KEY"; do
+            v="${v//$'\r'/}"; v="${v//$'\n'/}"
+            [ -n "$v" ] && echo "::add-mask::$v"
+          done
+          exit 0
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Trading day (America/New_York)
+        id: day
+        run: echo "date=$(TZ=America/New_York date +%F)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore today's alert marker
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .spcx-cache/
+          key: spcx-alert-${{ steps.day.outputs.date }}
+
+      - name: Check price and alert
+        env:
+          SPCX_WEBHOOK_URL: ${{ secrets.SPCX_WEBHOOK_URL }}
+          SPCX_WEBHOOK_KEY: ${{ secrets.SPCX_WEBHOOK_KEY }}
+          FORCE_TEST: ${{ inputs.force_test || 'false' }}
+        run: bash scripts/check.sh
