@@ -120,14 +120,16 @@ run stooqnd SPCX_WEBHOOK_URL="$HOOK" SPCX_WEBHOOK_KEY="$KEY" SPCX_URL_STOOQ="$BA
 check "stooq N/D -> non-zero, 0 POSTs" '[ "$RC" -ne 0 ] && [ "$(posts)" -eq 0 ]'
 
 echo "== 7. fallback chain picks the source that produced the price"
-run y2 SPCX_WEBHOOK_URL="$HOOK" SPCX_WEBHOOK_KEY="$KEY" SPCX_URL_YAHOO1="$BASE/404" SPCX_URL_YAHOO2="$BASE/yahoo-ok"
+run y2 SPCX_WEBHOOK_URL="$HOOK" SPCX_WEBHOOK_KEY="$KEY" NY_TODAY=2025-11-14 \
+  SPCX_URL_YAHOO1="$BASE/404" SPCX_URL_YAHOO2="$BASE/yahoo-ok"
 check "yahoo-query2 used, POST sent" '[ "$RC" -eq 0 ] && [ "$(last_post | jq -r .body | jq -r .source)" = yahoo-query2 ]'
 check "as_of_utc from regularMarketTime" '[ "$(last_post | jq -r .body | jq -r .as_of_utc)" = 2025-11-14T17:00:00Z ]'
 check "price from meta" '[ "$(last_post | jq -r .body | jq .price)" = 101.25 ]'
-run y1 SPCX_WEBHOOK_URL="$HOOK" SPCX_WEBHOOK_KEY="$KEY" SPCX_URL_YAHOO1="$BASE/yahoo-ok"
+run y1 SPCX_WEBHOOK_URL="$HOOK" SPCX_WEBHOOK_KEY="$KEY" NY_TODAY=2025-11-14 SPCX_URL_YAHOO1="$BASE/yahoo-ok"
 check "yahoo-query1 used" '[ "$(last_post | jq -r .body | jq -r .source)" = yahoo-query1 ]'
-run st SPCX_WEBHOOK_URL="$HOOK" SPCX_WEBHOOK_KEY="$KEY" SPCX_URL_STOOQ="$BASE/stooq-ok"
+run st SPCX_WEBHOOK_URL="$HOOK" SPCX_WEBHOOK_KEY="$KEY" NY_TODAY=2025-11-14 SPCX_URL_STOOQ="$BASE/stooq-ok"
 check "stooq used, price 103.5" '[ "$RC" -eq 0 ] && [ "$(last_post | jq -r .body | jq -c "[.source,.price]")" = "[\"stooq\",103.5]" ]'
+check "stooq as_of from Date/Time in America/New_York" '[ "$(last_post | jq -r .body | jq -r .as_of_utc)" = 2025-11-15T03:00:00Z ]'
 
 echo "== 8. webhook failure (non-test) -> non-zero, no marker, URL redacted"
 run postfail SPCX_WEBHOOK_URL="$BASE/fail" SPCX_WEBHOOK_KEY="$KEY" PRICE_OVERRIDE=50
@@ -139,9 +141,43 @@ run postconn SPCX_WEBHOOK_URL="http://127.0.0.1:1/hook/local-test-path" SPCX_WEB
 check "connect error -> non-zero, no marker" '[ "$RC" -ne 0 ] && [ ! -e "$MD" ]'
 check "connect error output redacted" 'no_secrets && ! grep -q "127.0.0.1" <<<"$OUT" && grep -q REDACTED_HOST <<<"$OUT"'
 
-echo "== 9. DRY_RUN=1 without secrets prints payload, no POST"
+echo "== 9. DRY_RUN=1 without secrets prints payload, no POST, no marker"
 run dry DRY_RUN=1 PRICE_OVERRIDE=90
 check "exit 0, payload printed, 0 POSTs" '[ "$RC" -eq 0 ] && grep -q "would POST payload" <<<"$OUT" && [ "$(posts)" -eq 0 ]'
+check "DRY_RUN does not write marker" '[ ! -e "$MD" ]'
+
+echo "== 10. stale quotes are skipped (exit 0, no POST, no marker)"
+# Fixture /yahoo-ok is regularMarketTime 2025-11-14 12:00 ET.
+run stale-yahoo SPCX_WEBHOOK_URL="$HOOK" SPCX_WEBHOOK_KEY="$KEY" \
+  NY_TODAY=2025-11-15 SPCX_URL_YAHOO1="$BASE/yahoo-ok"
+check "stale Yahoo: exit 0" '[ "$RC" -eq 0 ]'
+check "stale Yahoo: 0 POSTs" '[ "$(posts)" -eq 0 ]'
+check "stale Yahoo: no marker" '[ ! -e "$MD" ]'
+check "stale Yahoo: logs skip" 'grep -q "is not today (2025-11-15)" <<<"$OUT"'
+
+run fresh-yahoo SPCX_WEBHOOK_URL="$HOOK" SPCX_WEBHOOK_KEY="$KEY" \
+  NY_TODAY=2025-11-14 SPCX_URL_YAHOO1="$BASE/yahoo-ok"
+check "today Yahoo <= threshold: POST" '[ "$RC" -eq 0 ] && [ "$(posts)" -eq 1 ]'
+check "today Yahoo: marker written" '[ -f "$MD/alerted" ]'
+check "today Yahoo: as_of is the quote time" '[ "$(last_post | jq -r .body | jq -r .as_of_utc)" = 2025-11-14T17:00:00Z ]'
+
+run stale-stooq SPCX_WEBHOOK_URL="$HOOK" SPCX_WEBHOOK_KEY="$KEY" \
+  NY_TODAY=2025-11-15 SPCX_URL_STOOQ="$BASE/stooq-ok"
+check "stale Stooq: exit 0, no POST, no marker" '[ "$RC" -eq 0 ] && [ "$(posts)" -eq 0 ] && [ ! -e "$MD" ]'
+check "stale Stooq: logs skip" 'grep -q "Quote date 2025-11-14" <<<"$OUT"'
+
+# Thanksgiving 2025 was 27 Nov; quote is from a prior session.
+run holiday SPCX_WEBHOOK_URL="$HOOK" SPCX_WEBHOOK_KEY="$KEY" \
+  NY_TODAY=2025-11-27 SPCX_URL_YAHOO1="$BASE/yahoo-ok"
+check "holiday stale: exit 0, no POST, no marker" '[ "$RC" -eq 0 ] && [ "$(posts)" -eq 0 ] && [ ! -e "$MD" ]'
+check "holiday stale: logs today is 2025-11-27" 'grep -q "is not today (2025-11-27)" <<<"$OUT"'
+
+echo "== 11. FORCE_TEST still POSTs a stale quote with the real as_of, no marker"
+run force-stale SPCX_WEBHOOK_URL="$HOOK" SPCX_WEBHOOK_KEY="$KEY" FORCE_TEST=true \
+  NY_TODAY=2025-11-15 SPCX_URL_YAHOO1="$BASE/yahoo-ok"
+check "force stale: exit 0 and 1 POST" '[ "$RC" -eq 0 ] && [ "$(posts)" -eq 1 ]'
+check "force stale: test true and real as_of" 'B=$(last_post | jq -r .body); [ "$(jq -r .test <<<"$B")" = true ] && [ "$(jq -r .as_of_utc <<<"$B")" = 2025-11-14T17:00:00Z ] && [ "$(jq -r .source <<<"$B")" = yahoo-query1 ]'
+check "force stale: no marker" '[ ! -e "$MD" ]'
 
 echo
 echo "passed: $PASS  failed: $FAIL"

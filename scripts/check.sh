@@ -5,10 +5,11 @@
 # Env:
 #   SPCX_WEBHOOK_URL, SPCX_WEBHOOK_KEY  required unless DRY_RUN=1 (never printed)
 #   PRICE_THRESHOLD   default 115.00
-#   FORCE_TEST        true/TRUE/1 -> POST a test payload, ignore marker, never write it
-#   DRY_RUN           1 -> print payload instead of POSTing
+#   FORCE_TEST        true/TRUE/1 -> POST a test payload, ignore marker/staleness, never write marker
+#   DRY_RUN           1 -> print payload instead of POSTing; never write the marker
 #   MARKER_DIR        default .spcx-cache
-#   PRICE_OVERRIDE    use this price instead of fetching (tests)
+#   PRICE_OVERRIDE    use this price instead of fetching (tests); as_of is now
+#   NY_TODAY          YYYY-MM-DD to treat as today's America/New_York date (tests)
 #   SPCX_URL_YAHOO1 / SPCX_URL_YAHOO2 / SPCX_URL_STOOQ   source URL overrides (tests)
 #   FETCH_TIMEOUT     seconds per fetch, default 8
 # NOTE: never enable `set -x` in this script.
@@ -22,6 +23,7 @@ MARKER_DIR="${MARKER_DIR:-.spcx-cache}"
 MARKER="${MARKER_DIR}/alerted"
 FETCH_TIMEOUT="${FETCH_TIMEOUT:-8}"
 DRY_RUN="${DRY_RUN:-0}"
+NY_TODAY="${NY_TODAY:-$(TZ=America/New_York date +%F)}"
 UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 
 URL_Y1="${SPCX_URL_YAHOO1:-https://query1.finance.yahoo.com/v8/finance/chart/SPCX?interval=1m&range=1d}"
@@ -78,7 +80,7 @@ fi
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-PRICE="" AS_OF="" SOURCE=""
+PRICE="" AS_OF="" SOURCE="" QUOTE_NY=""
 
 # fetch <name> <url> -> sets HTTP_CODE, body in $TMP/body; returns non-zero on failure
 fetch() {
@@ -97,24 +99,27 @@ fetch() {
 }
 
 try_yahoo() {
-  local name="$1" url="$2" out p t
+  local name="$1" url="$2" out p ts
   fetch "$name" "$url" || return 1
   if ! out="$(jq -er '.chart.result[0].meta
         | select(.regularMarketPrice != null and .regularMarketTime != null)
-        | "\(.regularMarketPrice) \(.regularMarketTime | floor | todate)"' "$TMP/body" 2>/dev/null)"; then
+        | "\(.regularMarketPrice) \(.regularMarketTime | floor)"' "$TMP/body" 2>/dev/null)"; then
     log "source ${name}: unexpected JSON (no meta.regularMarketPrice/regularMarketTime)"
     return 1
   fi
-  p="${out%% *}"; t="${out#* }"
-  if ! is_number "$p"; then
-    log "source ${name}: price is not a positive number"
+  p="${out%% *}"; ts="${out#* }"
+  if ! is_number "$p" || ! [[ "$ts" =~ ^[0-9]+$ ]]; then
+    log "source ${name}: price or regularMarketTime is not a number"
     return 1
   fi
-  PRICE="$p" AS_OF="$t" SOURCE="$name"
+  PRICE="$p"
+  AS_OF="$(date -u -d "@$ts" +%Y-%m-%dT%H:%M:%SZ)"
+  QUOTE_NY="$(TZ=America/New_York date -d "@$ts" +%F)"
+  SOURCE="$name"
 }
 
 try_stooq() {
-  local name="stooq" line close
+  local name="stooq" line close d t
   fetch "$name" "$URL_STOOQ" || return 1
   if grep -qi '<html\|<!doctype' "$TMP/body"; then
     log "source ${name}: got HTML instead of CSV"
@@ -122,13 +127,29 @@ try_stooq() {
   fi
   # Header: Symbol,Date,Time,Open,High,Low,Close,Volume
   line="$(sed -n '2p' "$TMP/body" | tr -d '\r')"
+  d="$(printf '%s' "$line" | cut -d, -f2)"
+  t="$(printf '%s' "$line" | cut -d, -f3)"
   close="$(printf '%s' "$line" | cut -d, -f7)"
   if [ -z "$line" ] || [[ "$line" == *N/D* ]] || ! is_number "$close"; then
     log "source ${name}: no usable Close in CSV"
     return 1
   fi
-  # Stooq's Date/Time are exchange-local; use fetch time (UTC) as as_of.
-  PRICE="$close" AS_OF="$(date -u +%Y-%m-%dT%H:%M:%SZ)" SOURCE="$name"
+  if ! [[ "$d" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+    log "source ${name}: unusable Date column"
+    return 1
+  fi
+  if [ -z "$t" ]; then
+    t="16:00:00"
+  fi
+  # Stooq Date/Time are exchange-local (America/New_York for US names).
+  # Convert via epoch: `date -u` would otherwise ignore TZ= and treat the clock as UTC.
+  local epoch
+  if ! epoch="$(TZ=America/New_York date -d "${d} ${t}" +%s)"; then
+    log "source ${name}: could not parse Date/Time as America/New_York"
+    return 1
+  fi
+  AS_OF="$(date -u -d "@$epoch" +%Y-%m-%dT%H:%M:%SZ)"
+  PRICE="$close" QUOTE_NY="$d" SOURCE="$name"
 }
 
 if [ -n "${PRICE_OVERRIDE:-}" ]; then
@@ -136,7 +157,11 @@ if [ -n "${PRICE_OVERRIDE:-}" ]; then
     err "PRICE_OVERRIDE is not a number: '${PRICE_OVERRIDE}'"
     exit 2
   fi
-  PRICE="$PRICE_OVERRIDE" AS_OF="$(date -u +%Y-%m-%dT%H:%M:%SZ)" SOURCE="override"
+  PRICE="$PRICE_OVERRIDE"
+  AS_OF="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  # Override quotes are "now"; freshness uses the real current NY date of as_of.
+  QUOTE_NY="$(TZ=America/New_York date +%F)"
+  SOURCE="override"
 else
   try_yahoo yahoo-query1 "$URL_Y1" || try_yahoo yahoo-query2 "$URL_Y2" || try_stooq || {
     err "all price sources failed; not POSTing"
@@ -144,7 +169,15 @@ else
   }
 fi
 
-log "SPCX price ${PRICE} (as of ${AS_OF}, source ${SOURCE}); threshold ${THRESHOLD}"
+log "SPCX price ${PRICE} (as of ${AS_OF}, NY date ${QUOTE_NY}, source ${SOURCE}); threshold ${THRESHOLD}"
+
+if [ "$FORCE" -eq 0 ] && [ "$QUOTE_NY" != "$NY_TODAY" ]; then
+  log "Quote date ${QUOTE_NY} (America/New_York) is not today (${NY_TODAY}); skipping (no alert, no marker)."
+  exit 0
+fi
+if [ "$FORCE" -eq 1 ] && [ "$QUOTE_NY" != "$NY_TODAY" ]; then
+  log "FORCE_TEST: quote date ${QUOTE_NY} is not today (${NY_TODAY}); POSTing anyway with real as_of."
+fi
 
 AT_OR_BELOW="$(jq -n --argjson p "$PRICE" --argjson t "$THRESHOLD" '$p <= $t')"
 
@@ -190,6 +223,10 @@ fi
 
 log "Price at or below threshold; alerting."
 post || exit 4
+if [ "$DRY_RUN" = "1" ]; then
+  log "DRY_RUN=1: marker not written."
+  exit 0
+fi
 # Only create the cache dir now, so actions/cache saves today's key only after a real alert.
 mkdir -p "$MARKER_DIR"
 printf '%s %s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$PRICE" "$SOURCE" >"$MARKER"

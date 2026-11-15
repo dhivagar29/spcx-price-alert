@@ -15,7 +15,10 @@ Also `workflow_dispatch` (manual run, see below).
 
 1. The job computes today's date in `America/New_York` and restores the cache key `spcx-alert-<YYYY-MM-DD>` (path `.spcx-cache/`, no `restore-keys`).
 2. If `.spcx-cache/alerted` exists, today's alert already fired. The job exits without fetching anything.
-3. Otherwise it fetches the price and POSTs if `price <= PRICE_THRESHOLD`. The marker is written **only after a successful real POST**, so `actions/cache` saves today's key only then. Runs that skip the alert, fail, or are force tests never create `.spcx-cache/`, so they save nothing.
+3. Otherwise it fetches the price. If the quote's America/New_York date is not today (yesterday's close before the cash open, or a weekday market holiday), it exits 0 without POSTing or writing a marker.
+4. If `price <= PRICE_THRESHOLD`, it POSTs. The marker is written **only after a successful real POST**, so `actions/cache` saves today's key only then. Runs that skip the alert, fail, dry-run, or are force tests never create `.spcx-cache/`, so they save nothing.
+
+`force_test` still POSTs even when the quote is stale, and the payload keeps the real `as_of_utc`. GitHub cron can run several minutes late; the times above are not exact.
 
 To change the threshold, set a repository **variable** `PRICE_THRESHOLD`, e.g. `110.00`. The default is `115.00`.
 
@@ -23,7 +26,7 @@ To change the threshold, set a repository **variable** `PRICE_THRESHOLD`, e.g. `
 
 1. `query1.finance.yahoo.com/v8/finance/chart/SPCX?interval=1m&range=1d`: `meta.regularMarketPrice` / `meta.regularMarketTime`
 2. The same path on `query2.finance.yahoo.com`
-3. Stooq CSV `stooq.com/q/l/?s=spcx.us&f=sd2t2ohlcv&h&e=csv`: Close column (HTML, `N/D` and 404 are skipped; `as_of_utc` is the fetch time)
+3. Stooq CSV `stooq.com/q/l/?s=spcx.us&f=sd2t2ohlcv&h&e=csv`: Close column; `as_of_utc` comes from the Date and Time columns interpreted as America/New_York (HTML, `N/D` and 404 are skipped)
 
 Requests use a browser User-Agent. Each fetch times out after 8 s. If all three fail, the run fails and nothing is POSTed. The payload's `source` field names the source that produced the price.
 
@@ -50,7 +53,7 @@ Force-test runs add `"test":true`.
 
 ## Manual test run
 
-Actions → **spcx-price-alert** → *Run workflow* → tick **force_test** → Run. This sends a test payload whatever the price is, and ignores and never writes today's marker. With the CLI: `gh workflow run spcx-price-alert.yml -f force_test=true`.
+Actions → **spcx-price-alert** → *Run workflow* → tick **force_test** → Run. This sends a test payload whatever the price is (including a stale quote), and ignores and never writes today's marker. With the CLI: `gh workflow run spcx-price-alert.yml -f force_test=true`.
 
 ## Local tests
 
@@ -68,4 +71,4 @@ Try the script with no secrets and no network:
 DRY_RUN=1 PRICE_OVERRIDE=100 MARKER_DIR=/tmp/spcx bash scripts/check.sh
 ```
 
-Useful environment variables: `DRY_RUN=1`, `PRICE_OVERRIDE`, `FORCE_TEST`, `MARKER_DIR`, `FETCH_TIMEOUT`, and `SPCX_URL_YAHOO1` / `SPCX_URL_YAHOO2` / `SPCX_URL_STOOQ` to override the source URLs.
+Useful environment variables: `DRY_RUN=1`, `PRICE_OVERRIDE`, `FORCE_TEST`, `NY_TODAY` (YYYY-MM-DD, America/New_York date for freshness tests), `MARKER_DIR`, `FETCH_TIMEOUT`, and `SPCX_URL_YAHOO1` / `SPCX_URL_YAHOO2` / `SPCX_URL_STOOQ` to override the source URLs.

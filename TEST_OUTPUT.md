@@ -1,6 +1,6 @@
 # Test output
 
-Run on 2026-11-15T06:46:22Z, Linux, GNU bash, version 5.2.37(1)-release, jq jq-1.7, shellcheck 0.10.0, actionlint 1.7.7.
+Run on 2026-11-15T06:53:22Z (12:23:22 IST, Asia/Calcutta), Linux, GNU bash, version 5.2.37(1)-release, jq jq-1.7, shellcheck 0.10.0, actionlint 1.7.7.
 
 ## `bash test/run.sh`
 
@@ -61,16 +61,33 @@ ok   - as_of_utc from regularMarketTime
 ok   - price from meta
 ok   - yahoo-query1 used
 ok   - stooq used, price 103.5
+ok   - stooq as_of from Date/Time in America/New_York
 == 8. webhook failure (non-test) -> non-zero, no marker, URL redacted
 ok   - non-zero exit
 ok   - no marker
 ok   - URL/key not printed
 ok   - connect error -> non-zero, no marker
 ok   - connect error output redacted
-== 9. DRY_RUN=1 without secrets prints payload, no POST
+== 9. DRY_RUN=1 without secrets prints payload, no POST, no marker
 ok   - exit 0, payload printed, 0 POSTs
-passed: 49  failed: 0
-exit=0
+ok   - DRY_RUN does not write marker
+== 10. stale quotes are skipped (exit 0, no POST, no marker)
+ok   - stale Yahoo: exit 0
+ok   - stale Yahoo: 0 POSTs
+ok   - stale Yahoo: no marker
+ok   - stale Yahoo: logs skip
+ok   - today Yahoo <= threshold: POST
+ok   - today Yahoo: marker written
+ok   - today Yahoo: as_of is the quote time
+ok   - stale Stooq: exit 0, no POST, no marker
+ok   - stale Stooq: logs skip
+ok   - holiday stale: exit 0, no POST, no marker
+ok   - holiday stale: logs today is 2025-11-27
+== 11. FORCE_TEST still POSTs a stale quote with the real as_of, no marker
+ok   - force stale: exit 0 and 1 POST
+ok   - force stale: test true and real as_of
+ok   - force stale: no marker
+passed: 65  failed: 0
 ```
 
 ## `shellcheck scripts/check.sh test/run.sh`
@@ -85,6 +102,12 @@ exit=0
 (no findings) exit=0
 ```
 
+## `gitleaks detect --source . --no-git`
+
+```
+no leaks found
+```
+
 ## Live fetch check (DRY_RUN=1, no secrets, no POST)
 
 After switching the script to a Windows Chrome User-Agent (Yahoo returned 429 for a generic Linux UA from this box):
@@ -96,3 +119,4 @@ rc=0
 ```
 
 `query1.finance.yahoo.com` and `query2.finance.yahoo.com` both resolved SPCX at 139.11 USD, `regularMarketTime` 1794603601 = 2026-11-13T21:00:01Z (Friday cash close; this check ran on Sunday 2026-11-15). Stooq CSV `https://stooq.com/q/l/?s=spcx.us&f=sd2t2ohlcv&h&e=csv` returned HTTP 404 from this box. No POST was sent (DRY_RUN, and the price is above 115.00).
+
